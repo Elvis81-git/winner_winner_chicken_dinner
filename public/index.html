@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Gravity Royale - 2D 物理大逃殺遊戲</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+
+    <!-- 背景動態發光 -->
+    <div class="stars-bg"></div>
+    <div class="bg-glow"></div>
+    <div class="bg-glow bg-glow-2"></div>
+
+    <div id="app-container">
+        <!-- 1. 遊戲大廳大門 -->
+        <div id="join-screen" class="glass-panel active">
+            <h1 class="glitch-text" data-text="GRAVITY">GRAVITY <span class="neon-text">ROYALE</span></h1>
+            <p class="subtitle">物理大逃殺 ‧ 毒圈存活戰</p>
+            
+            <div class="form-group">
+                <label for="username-input">玩家代號</label>
+                <input type="text" id="username-input" placeholder="輸入你的暱稱..." maxlength="10" autocomplete="off">
+            </div>
+
+            <div class="form-group">
+                <label for="room-input">房間代碼 (留空則加入預設房)</label>
+                <input type="text" id="room-input" placeholder="例如: LOBBY" maxlength="8" autocomplete="off" style="text-transform: uppercase;">
+            </div>
+
+            <button id="join-btn" class="glow-button">進入戰區</button>
+
+            <div class="game-rules">
+                <h3>🎮 規則與按鍵指南</h3>
+                <ul>
+                    <li>🏃‍♂️ <b>操作方式</b>: <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> 或 <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd></li>
+                    <li>⚡ <b>物理衝撞 (Dash)</b>: 按下 <kbd>空白鍵 (Space)</kbd> 消耗能量快速衝刺，能<b>擊退</b>對手或推箱子！</li>
+                    <li>🌀 <b>角色技能</b>: 按下 <kbd>E</kbd> 鍵（或點擊滑鼠左鍵）施放選擇的技能！有瞬間移動 🌌、跑速變快 ⚡、召喚冰牆 🧊、重力衝擊波 💥。</li>
+                    <li>🔋 <b>次數恢復</b>: 次數用完會隨時間慢慢恢復，也可以拾取地上的 🔋 能量包加速恢復！</li>
+                    <li>💀 <b>毒圈邊緣</b>: 玩家間攻擊不會扣血，只有地圖邊緣收縮的<b>毒圈</b>有傷害。存活到最後者勝！</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 2. 遊戲房間 / 戰場主畫面 -->
+        <div id="game-screen" class="hidden">
+            <div class="top-bar">
+                <div class="room-info">
+                    房間代碼: <span id="display-room-id" class="highlight">-</span>
+                </div>
+                <div class="players-online">
+                    連線玩家: <span id="online-count" class="highlight">0</span> 人
+                </div>
+            </div>
+
+            <div class="game-layout">
+                <!-- 側邊欄 (玩家清單與房間設定) -->
+                <div class="sidebar-panel glass-panel">
+                    <div class="roster-header">戰友清單</div>
+                    <div id="players-roster" class="roster-list">
+                        <!-- 動態填入 -->
+                    </div>
+                    
+                    <!-- 房間大廳設定 (僅房主可控) -->
+                    <div id="host-settings-panel" class="host-settings hidden">
+                        <div class="setting-title">房間設定 (房主專屬)</div>
+                        <div class="setting-item">
+                            <label for="bot-count">AI 機器人數量:</label>
+                            <select id="bot-count" class="form-control">
+                                <option value="0" selected>不加入機器人</option>
+                                <option value="1">1 名機器人</option>
+                                <option value="2">2 名機器人</option>
+                                <option value="3">3 名機器人</option>
+                                <option value="4">4 名機器人</option>
+                                <option value="5">5 名機器人</option>
+                                <option value="6">6 名機器人</option>
+                                <option value="7">7 名機器人</option>
+                            </select>
+                        </div>
+                        <div class="setting-item">
+                            <label for="max-players">房間人數上限:</label>
+                            <select id="max-players" class="form-control">
+                                <option value="8" selected>8 人</option>
+                                <option value="6">6 人</option>
+                                <option value="4">4 人</option>
+                                <option value="2">2 人</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 技能選擇區 -->
+                    <div class="trap-selector-box">
+                        <div class="setting-title">選擇攜帶技能</div>
+                        <div class="trap-selectors" style="grid-template-columns: 1fr 1fr; gap: 8px;">
+                            <button class="btn-trap active" data-trap="teleport">瞬間移動 🌌</button>
+                            <button class="btn-trap" data-trap="speed">跑速變快 ⚡</button>
+                            <button class="btn-trap" data-trap="freeze">召喚冰牆 🧊</button>
+                            <button class="btn-trap" data-trap="shockwave">重力衝擊波 💥</button>
+                        </div>
+                    </div>
+                    
+                    <div class="sidebar-footer">
+                        <div class="shortcut-tip">
+                            移動: <span>WASD / 方向鍵</span><br>
+                            衝撞: <span>空白鍵 (Space)</span><br>
+                            技能: <span>E / 按滑鼠左鍵</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 戰場主畫布 -->
+                <div class="canvas-container">
+                    <!-- HUD 抬頭顯示器 -->
+                    <div id="hud">
+                        <!-- 頂部狀態 -->
+                        <div id="hud-status">等待玩家加入...</div>
+                        
+                        <!-- 倒數與存活狀態 -->
+                        <div class="hud-stats-row">
+                            <div class="hud-stat-box">
+                                <span class="label">剩餘時間</span>
+                                <span id="hud-timer" class="value">--</span>
+                            </div>
+                            <div class="hud-stat-box">
+                                <span class="label">存活人數</span>
+                                <span id="hud-humans" class="value">0</span>
+                            </div>
+                        </div>
+
+                        <!-- 狀態條 (血量 HP / 精力 Energy) -->
+                        <div class="hud-bars">
+                            <div class="hud-bar-wrapper">
+                                <span class="bar-label">HP <span id="hud-hp-val">100</span></span>
+                                <div class="bar-track"><div id="hud-hp-fill" class="bar-fill hp" style="width: 100%;"></div></div>
+                            </div>
+                            <div class="hud-bar-wrapper">
+                                <span class="bar-label">ENERGY <span id="hud-energy-val">100</span></span>
+                                <div class="bar-track"><div id="hud-energy-fill" class="bar-fill energy" style="width: 100%;"></div></div>
+                            </div>
+                        </div>
+
+                        <!-- 快捷槽 (衝撞與陷阱數量) -->
+                        <div class="hud-skills-row">
+                            <div class="hud-skill-slot">
+                                <span class="slot-bind">SPACE</span>
+                                <span class="slot-name">衝撞 (Dash)</span>
+                                <div id="cooldown-fill"></div> <!-- reuse cooldown-fill for dash overlay -->
+                            </div>
+                            <div class="hud-skill-slot">
+                                <span class="slot-bind">E / CLICK</span>
+                                <span class="slot-name" id="hud-trap-display">選擇的技能 (x3)</span>
+                            </div>
+                        </div>
+
+                        <!-- 戰場小地圖 -->
+                        <div class="hud-minimap-box">
+                            <canvas id="minimap" width="100" height="100"></canvas>
+                        </div>
+
+                        <!-- 消息跑馬燈 -->
+                        <div id="feed-logs" class="logs-container"></div>
+                    </div>
+
+                    <!-- 開始按鈕 -->
+                    <button id="start-game-btn" class="glow-button green hidden">開始遊戲</button>
+
+                    <canvas id="game-canvas"></canvas>
+
+                    <!-- 遊戲結束結算畫面 -->
+                    <div id="end-overlay" class="hidden">
+                        <div class="end-content">
+                            <h2 id="winner-announcement" class="winner-text">VICTORY</h2>
+                            <p class="winner-sub">大逃殺已決出勝負！</p>
+                            <p class="end-timer">重新回到大廳倒數: <span id="restart-countdown">--</span> 秒</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 手機端虛擬搖桿 (支援響應式) -->
+            <div id="mobile-controls-container" class="hidden">
+                <div id="joystick-zone"></div>
+                <button id="mobile-shoot-btn">
+                    <span>衝撞</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 腳本載入 -->
+    <script src="joystick.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
