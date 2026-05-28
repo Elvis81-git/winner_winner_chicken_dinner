@@ -20,6 +20,22 @@ function generateId() {
   return Math.random().toString(36).substring(2, 9);
 }
 
+// Distance from point (px, py) to line segment (ax, ay) -> (bx, by)
+function getDistanceToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+  
+  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  
+  const closestX = ax + t * dx;
+  const closestY = ay + t * dy;
+  
+  return Math.hypot(px - closestX, py - closestY);
+}
+
 class GameRoom {
   constructor(roomId, io) {
     this.roomId = roomId;
@@ -86,11 +102,22 @@ class GameRoom {
       selectedTrap: 'teleport',
       speedBoostUntil: 0,
       skillRegenTimer: 12000,
+      railgunChargeStart: 0,
+      railgunCharging: false,
+      invincibleUntil: 0,
       health: 100,
+      maxHealth: 100,
+      invisibleUntil: 0,
       isAlive: true,
       isBot: false,
       color: color,
-      isHost: isRoomHost
+      isHost: isRoomHost,
+      wins: 0,
+      sizeState: 'normal',
+      comboCount: 0,
+      gameStats: { movedDistance: 0, pushedDistance: 0, kills: 0 },
+      lastHurtBy: null,
+      lastHurtTime: 0
     };
 
     this.addLog(`${this.players[socketId].name} 進入了大廳`);
@@ -206,16 +233,27 @@ class GameRoom {
       p.dx = 0;
       p.dy = 0;
       p.angle = angle;
+      p.radius = 20;
       p.health = 100;
+      p.maxHealth = 100;
+      p.invisibleUntil = 0;
       p.stamina = 100;
       p.isAlive = true;
       p.shieldCount = 0;
       p.trapsInventory = 3;
       p.speedBoostUntil = 0;
       p.stunnedUntil = 0;
+      p.railgunChargeStart = 0;
+      p.railgunCharging = false;
+      p.invincibleUntil = 0;
       p.slowedUntil = 0;
       p.frozenUntil = 0;
       p.reversedUntil = 0;
+      p.sizeState = 'normal';
+      p.comboCount = 0;
+      p.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+      p.lastHurtBy = null;
+      p.lastHurtTime = 0;
     });
 
     // Remove old bots
@@ -254,14 +292,25 @@ class GameRoom {
         reversedUntil: 0,
         shieldCount: 0,
         trapsInventory: 3,
-        selectedTrap: ['teleport', 'speed', 'freeze', 'shockwave'][Math.floor(Math.random() * 4)],
+        selectedTrap: ['teleport', 'speed', 'freeze', 'shockwave', 'invisibility', 'railgun'][Math.floor(Math.random() * 6)],
         speedBoostUntil: 0,
         skillRegenTimer: 12000,
+        railgunChargeStart: 0,
+        railgunCharging: false,
+        invincibleUntil: 0,
         health: 100,
+        maxHealth: 100,
+        invisibleUntil: 0,
         isAlive: true,
         isBot: true,
         color: '#7F8C8D',
         isHost: false,
+        wins: 0,
+        sizeState: 'normal',
+        comboCount: 0,
+        gameStats: { movedDistance: 0, pushedDistance: 0, kills: 0 },
+        lastHurtBy: null,
+        lastHurtTime: 0,
         
         // Bot AI states
         aiState: 'wander',
@@ -272,8 +321,19 @@ class GameRoom {
     }
 
     // Spawn boxes (Wood / Iron circular crates)
-    const boxCount = 30;
-    for (let i = 0; i < boxCount; i++) {
+    this.spawnBoxes(30);
+
+    // Spawn items
+    this.spawnPowerups(10);
+    this.spawnTraps(12); // Spawn 12 traps randomly across map
+
+    this.lastTickTime = Date.now();
+    this.addLog("☠️ 大逃殺開始！用衝撞推開對手，存活至最後！");
+    this.io.to(this.roomId).emit('sound', 'start');
+  }
+
+  spawnBoxes(count) {
+    for (let i = 0; i < count; i++) {
       const isIron = Math.random() < 0.3; // 30% iron boxes
       this.boxes.push({
         id: `box_${generateId()}`,
@@ -287,18 +347,10 @@ class GameRoom {
         slideSpeed: 0
       });
     }
-
-    // Spawn items
-    this.spawnPowerups(10);
-    this.spawnTraps(12); // Spawn 12 traps randomly across map
-
-    this.lastTickTime = Date.now();
-    this.addLog("☠️ 大逃殺開始！用衝撞推開對手，存活至最後！");
-    this.io.to(this.roomId).emit('sound', 'start');
   }
 
   spawnPowerups(count) {
-    const types = ['shield', 'trap_pack', 'boots'];
+    const types = ['shield', 'trap_pack', 'boots', 'grow_fruit', 'shrink_fruit'];
     for (let i = 0; i < count; i++) {
       const type = types[Math.floor(Math.random() * types.length)];
       this.powerups.push({
@@ -372,16 +424,14 @@ class GameRoom {
       player.x = Math.max(player.radius, Math.min(MAP_WIDTH - player.radius, player.x));
       player.y = Math.max(player.radius, Math.min(MAP_HEIGHT - player.radius, player.y));
 
+      player.invincibleUntil = now + 2000; // 2 seconds invincibility!
       player.trapsInventory--;
       this.io.to(this.roomId).emit('effect', { type: 'teleportTrigger', x: player.x, y: player.y, color: '#9B59B6' });
-      this.addLog(`🌀 ${player.name} 使用了瞬間移動！`);
+      this.addLog(`🌀 ${player.name} 使用了瞬間移動，並獲得 2 秒無敵！`);
     } 
     else if (skillType === 'speed') {
-      // 2. Speed Boost
-      player.speedBoostUntil = now + 3000; // 3 seconds speed boost
-      player.trapsInventory--;
-      this.io.to(this.roomId).emit('effect', { type: 'springTrigger', x: player.x, y: player.y, color: '#2ECC71' }); // reuse spring/speed sound and green particles
-      this.addLog(`⚡ ${player.name} 啟動了加速技能！`);
+      // Permanent speed boost passive, do not cast or consume charges
+      return;
     } 
     else if (skillType === 'freeze') {
       // 3. Spawn ice wall (5 blocks perpendicular to player's facing direction, flying outward)
@@ -440,7 +490,7 @@ class GameRoom {
           const nx = dx / (dist || 1);
           const ny = dy / (dist || 1);
           
-          this.applyKnockback(player, p, nx, ny, now, 28.0); // Extreme push (increased from 15.0 to 28.0)
+          this.applyKnockback(player, p, nx, ny, now, 28.0, 'shockwave'); // Extreme push (increased from 15.0 to 28.0)
         }
       });
 
@@ -465,6 +515,19 @@ class GameRoom {
       this.io.to(this.roomId).emit('sound', 'infect'); // plays death/shockwave intense sound
       this.addLog(`💥 ${player.name} 施放了重力衝擊波，推開了周圍的所有物體與對手！`);
     }
+    else if (skillType === 'invisibility') {
+      player.invisibleUntil = now + 5000;
+      player.trapsInventory--;
+      this.io.to(this.roomId).emit('effect', { type: 'teleportTrigger', x: player.x, y: player.y, color: '#FFFFFF' });
+      this.addLog(`👻 ${player.name} 進入了隱形狀態！`);
+    }
+    else if (skillType === 'railgun') {
+      player.railgunChargeStart = now;
+      player.railgunCharging = true;
+      player.trapsInventory--;
+      this.io.to(this.roomId).emit('sound', 'teleportTrigger');
+      this.addLog(`⚡ ${player.name} 開始為電磁砲充能...`);
+    }
   }
 
   tick() {
@@ -480,12 +543,18 @@ class GameRoom {
       this.checkTraps(now);
       this.checkPowerups(now);
 
-      if (this.powerups.length < 4 && Math.random() < 0.01) {
+      if (this.powerups.length < 8 && Math.random() < 0.015) {
         this.spawnPowerups(2);
       }
 
-      if (this.traps.length < 5 && Math.random() < 0.01) {
+      if (this.traps.length < 12 && Math.random() < 0.015) {
         this.spawnTraps(2);
+        this.addLog("⚠️ 戰區中生成了新的隨機陷阱！");
+      }
+
+      if (this.boxes.filter(b => b.type !== 'ice').length < 35 && Math.random() < 0.008) {
+        this.spawnBoxes(1);
+        this.addLog("📦 戰區中落下了新的障礙物箱子！");
       }
 
       this.checkGameOver();
@@ -535,6 +604,58 @@ class GameRoom {
       const isFrozen = now < player.frozenUntil;
       const isSlowed = now < player.slowedUntil;
 
+      // Railgun charge / fire logic
+      if (player.railgunCharging) {
+        if (isFrozen || isStunned) {
+          player.railgunCharging = false;
+          this.addLog(`⚡ [${player.name}] 的電磁砲充能被中斷了！`);
+        } else if (now >= player.railgunChargeStart + 1000) {
+          player.railgunCharging = false;
+          
+          // Firing Railgun!
+          const angle = player.angle || 0;
+          const range = 1000;
+          const endX = player.x + Math.cos(angle) * range;
+          const endY = player.y + Math.sin(angle) * range;
+          
+          // Push opponents
+          Object.values(this.players).forEach(p => {
+            if (p.id === player.id || !p.isAlive) return;
+            const dist = getDistanceToSegment(p.x, p.y, player.x, player.y, endX, endY);
+            if (dist < 15 + p.radius) {
+              const pushAngle = angle;
+              const nx = Math.cos(pushAngle);
+              const ny = Math.sin(pushAngle);
+              this.applyKnockback(player, p, nx, ny, now, 133.0, 'railgun');
+            }
+          });
+          
+          // Push boxes
+          this.boxes.forEach(box => {
+            const dist = getDistanceToSegment(box.x, box.y, player.x, player.y, endX, endY);
+            if (dist < 15 + box.radius) {
+              const pushAngle = angle;
+              const nx = Math.cos(pushAngle);
+              const ny = Math.sin(pushAngle);
+              const pushForce = 80 / box.mass;
+              box.vx = nx * pushForce;
+              box.vy = ny * pushForce;
+            }
+          });
+          
+          // Emit effect
+          this.io.to(this.roomId).emit('effect', {
+            type: 'railgunFire',
+            x1: player.x,
+            y1: player.y,
+            x2: endX,
+            y2: endY
+          });
+          
+          this.addLog(`⚡ [${player.name}] 發射了電磁砲！`);
+        }
+      }
+
       // Update timers
       if (player.dashCooldown > 0) player.dashCooldown -= dt * 1000;
       if (player.dashActiveTimer > 0) {
@@ -567,8 +688,19 @@ class GameRoom {
 
       // Physics
       let moveSpeed = player.speed * 60;
-      if (now < player.speedBoostUntil) {
-        moveSpeed *= 1.6; // 60% speed boost
+      if (now < player.speedBoostUntil || player.selectedTrap === 'speed') {
+        moveSpeed *= 2.5; // Buffed from 1.6 to 2.5 (2.5x normal speed)
+      }
+      if (player.sizeState === 'big') {
+        moveSpeed *= 0.6; // 40% speed reduction for big size
+      } else if (player.sizeState === 'small') {
+        moveSpeed *= 1.4; // 40% speed increase for small size
+      }
+      if (now < (player.invisibleUntil || 0)) {
+        moveSpeed *= 0.7; // 30% speed reduction for invisibility
+      }
+      if (player.railgunCharging) {
+        moveSpeed *= 0.1; // 90% speed reduction while charging
       }
 
       let moveX = (player.dx || 0) * moveSpeed;
@@ -588,6 +720,9 @@ class GameRoom {
       if (Math.abs(player.vx) < 5) player.vx = 0;
       if (Math.abs(player.vy) < 5) player.vy = 0;
 
+      const prevX = player.x;
+      const prevY = player.y;
+
       if (!isFrozen && !isStunned) {
         player.x += moveX * dt;
         player.y += moveY * dt;
@@ -600,14 +735,35 @@ class GameRoom {
       player.x = Math.max(player.radius, Math.min(MAP_WIDTH - player.radius, player.x));
       player.y = Math.max(player.radius, Math.min(MAP_HEIGHT - player.radius, player.y));
 
+      const distMoved = Math.hypot(player.x - prevX, player.y - prevY);
+      if (!player.gameStats) {
+        player.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+      }
+      player.gameStats.movedDistance += distMoved;
+
       // Zone Damage
       const distToCenter = Math.hypot(player.x - this.zone.x, player.y - this.zone.y);
-      if (distToCenter > this.zone.radius) {
+      if (distToCenter > this.zone.radius && now >= (player.invincibleUntil || 0)) {
         player.health -= this.zone.damage * dt * 10;
         if (player.health <= 0) {
           player.health = 0;
           player.isAlive = false;
-          this.addLog(`💀 ${player.name} 死在毒氣中`);
+
+          let killedByPlayer = false;
+          if (player.lastHurtBy && (now - player.lastHurtTime < 8000)) {
+            const killer = this.players[player.lastHurtBy];
+            if (killer && killer.id !== player.id) {
+              if (!killer.gameStats) {
+                killer.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+              }
+              killer.gameStats.kills++;
+              this.addLog(`💀 ${player.name} 被 ${killer.name} 推入毒氣中殺死！`);
+              killedByPlayer = true;
+            }
+          }
+          if (!killedByPlayer) {
+            this.addLog(`💀 ${player.name} 死在毒氣中`);
+          }
           this.io.to(this.roomId).emit('sound', 'infect'); // plays death sound
         }
       }
@@ -645,7 +801,7 @@ class GameRoom {
     let minPowerupDist = Infinity;
 
     Object.values(this.players).forEach(p => {
-      if (p.id === bot.id || !p.isAlive) return;
+      if (p.id === bot.id || !p.isAlive || now < (p.invisibleUntil || 0)) return;
       const d = Math.hypot(p.x - bot.x, p.y - bot.y);
       if (d < minEnemyDist) {
         minEnemyDist = d;
@@ -692,6 +848,8 @@ class GameRoom {
         } else if (bot.selectedTrap === 'teleport' && minEnemyDist > 200) {
           this.castSkill(bot.id);
         } else if (bot.selectedTrap === 'shockwave' && minEnemyDist < 160) {
+          this.castSkill(bot.id);
+        } else if (bot.selectedTrap === 'railgun' && minEnemyDist < 400) {
           this.castSkill(bot.id);
         }
       }
@@ -786,9 +944,9 @@ class GameRoom {
           p2.y += ny * overlap * 0.5;
 
           if (p1.isDashing && !p2.isDashing) {
-            this.applyKnockback(p1, p2, nx, ny, now);
+            this.applyKnockback(p1, p2, nx, ny, now, null, 'dash');
           } else if (p2.isDashing && !p1.isDashing) {
-            this.applyKnockback(p2, p1, -nx, -ny, now);
+            this.applyKnockback(p2, p1, -nx, -ny, now, null, 'dash');
           } else {
             const kx = p1.vx - p2.vx;
             const ky = p1.vy - p2.vy;
@@ -822,6 +980,11 @@ class GameRoom {
             box.vx = nx * pushForce;
             box.vy = ny * pushForce;
 
+            if (!player.gameStats) {
+              player.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+            }
+            player.gameStats.pushedDistance += overlap + pushForce * 10;
+
             player.vx = -nx * 3;
             player.vy = -ny * 3;
             player.isDashing = false;
@@ -850,7 +1013,7 @@ class GameRoom {
             } else {
               // Opponent/Player is in front of the sliding box: apply knockback and push
               const knockbackPower = box.slideSpeed * 1.5;
-              this.applyKnockback({ name: '滑行的箱子', vx: box.vx, vy: box.vy, isDashing: true }, player, -nx, -ny, now, knockbackPower);
+              this.applyKnockback({ name: '滑行的箱子', vx: box.vx, vy: box.vy, isDashing: true }, player, -nx, -ny, now, knockbackPower, box.type === 'ice' ? 'icewall' : 'box');
               
               if (box.type !== 'ice') {
                 box.vx *= 0.3;
@@ -909,7 +1072,17 @@ class GameRoom {
     }
   }
 
-  applyKnockback(attacker, victim, nx, ny, now, customPower) {
+  applyKnockback(attacker, victim, nx, ny, now, customPower, source) {
+    if (now < (victim.invincibleUntil || 0)) {
+      // Immune to all knockbacks when invincible
+      return;
+    }
+
+    if (victim.sizeState === 'big' && (source === 'dash' || source === 'box')) {
+      // Immune to Space-bar dash and sliding boxes
+      return;
+    }
+
     if (victim.shieldCount > 0) {
       victim.shieldCount--;
       victim.stunnedUntil = now + 100;
@@ -919,7 +1092,11 @@ class GameRoom {
       return;
     }
 
-    const power = customPower || 7.0;
+    let power = customPower || 7.0;
+    if (victim.sizeState === 'small') {
+      power *= 1.5; // Pushed 50% further
+    }
+
     // Scale the velocity values to match dt system (velocity is pixels/second)
     victim.vx = nx * power * 45;
     victim.vy = ny * power * 45;
@@ -927,6 +1104,30 @@ class GameRoom {
     victim.stunnedUntil = now + 400;
     victim.isDashing = false;
     victim.dashActiveTimer = 0;
+
+    // Track last hurt by for kill attribution
+    if (attacker && attacker.id) {
+      victim.lastHurtBy = attacker.id;
+      victim.lastHurtTime = now;
+
+      // Accumulate pushed distance on attacker
+      if (!attacker.gameStats) {
+        attacker.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+      }
+      attacker.gameStats.pushedDistance += power * 7.5;
+
+      // Handle combo count
+      if (attacker.id !== victim.id) {
+        attacker.comboCount = (attacker.comboCount || 0) + 1;
+        if (attacker.comboCount >= 5) {
+          attacker.comboCount = 0;
+          attacker.maxHealth = (attacker.maxHealth || 100) + 10;
+          attacker.health += 10; // Uncapped max health increase, also heals by 10!
+          this.addLog(`🔥 COMBO! ${attacker.name} 成功連擊 5 次，最大生命值永久提升 10！`);
+          this.io.to(this.roomId).emit('effect', { type: 'pickup', x: attacker.x, y: attacker.y, color: '#2ECC71' }); // Green particles
+        }
+      }
+    }
 
     this.io.to(this.roomId).emit('effect', { type: 'knockback', x: victim.x, y: victim.y, color: victim.color });
   }
@@ -1029,15 +1230,21 @@ class GameRoom {
             player.shieldCount = Math.min(2, player.shieldCount + 1);
           } else if (pw.type === 'trap_pack') {
             player.trapsInventory = Math.min(5, player.trapsInventory + 1); // +1 skill charge, max 5
+            player.speed = Math.min(6.5, player.speed * 1.1); // Permanent +10% speed boost!
+            this.addLog(`🔋 ${player.name} 拾取了能量包，技能次數+1，速度提升 10%！`);
           } else if (pw.type === 'boots') {
             if (player.speed < 6.0) player.speed += 0.4;
+          } else if (pw.type === 'grow_fruit') {
+            player.sizeState = 'big';
+            player.radius = 35;
+            this.addLog(`🍊 ${player.name} 吃了橘子果實，體型變大，速度變慢且無法被推走！`);
+          } else if (pw.type === 'shrink_fruit') {
+            player.sizeState = 'small';
+            player.radius = 12;
+            this.addLog(`🍓 ${player.name} 吃了草莓果實，體型變小，速度變快！`);
           }
-
-          this.io.to(this.roomId).emit('effect', { type: 'pickup', x: pw.x, y: pw.y, color: '#F1C40F' });
-          break;
         }
       }
-
       return !picked;
     });
   }
@@ -1046,11 +1253,10 @@ class GameRoom {
     if (this.state !== 'PLAYING') return;
 
     const alivePlayers = Object.values(this.players).filter(p => p.isAlive);
-
-    if (alivePlayers.length === 1) {
-      this.endGame(alivePlayers[0]);
-    } else if (alivePlayers.length === 0) {
+    if (alivePlayers.length === 0) {
       this.endGame(null);
+    } else if (alivePlayers.length === 1) {
+      this.endGame(alivePlayers[0]);
     }
   }
 
@@ -1061,12 +1267,35 @@ class GameRoom {
     this.traps = [];
 
     if (winner) {
+      winner.wins = (winner.wins || 0) + 1;
       this.addLog(`🎉 遊戲結束！生存者 ${winner.name} 贏得了最終勝利！`);
       this.io.to(this.roomId).emit('sound', 'victory');
     } else {
       this.addLog("☠️ 所有生存者皆已被毒死，無人獲勝！");
       this.io.to(this.roomId).emit('sound', 'defeat');
     }
+
+    // Calculate round achievements
+    let maxMoved = 0, maxPushed = 0, maxKills = 0;
+    let athlete = null, hercules = null, terminator = null;
+
+    Object.values(this.players).forEach(p => {
+      if (p.gameStats) {
+        if (p.gameStats.movedDistance > maxMoved) {
+          maxMoved = p.gameStats.movedDistance;
+          athlete = { name: p.name, color: p.color, value: Math.round(p.gameStats.movedDistance) };
+        }
+        if (p.gameStats.pushedDistance > maxPushed) {
+          maxPushed = p.gameStats.pushedDistance;
+          hercules = { name: p.name, color: p.color, value: Math.round(p.gameStats.pushedDistance) };
+        }
+        if (p.gameStats.kills > maxKills) {
+          maxKills = p.gameStats.kills;
+          terminator = { name: p.name, color: p.color, value: p.gameStats.kills };
+        }
+      }
+    });
+    this.roundAchievements = { athlete, hercules, terminator };
 
     this.broadcastState();
 
@@ -1079,6 +1308,7 @@ class GameRoom {
   resetToLobby() {
     this.state = 'LOBBY';
     this.winner = null;
+    this.roundAchievements = null;
     this.boxes = [];
     this.traps = [];
     this.logs = [];
@@ -1092,13 +1322,24 @@ class GameRoom {
       p.dx = 0;
       p.dy = 0;
       p.angle = 0;
+      p.radius = 20;
       p.health = 100;
+      p.maxHealth = 100;
+      p.invisibleUntil = 0;
       p.isAlive = true;
       p.shieldCount = 0;
       p.trapsInventory = 3;
       p.speedBoostUntil = 0;
       p.skillRegenTimer = 12000;
       p.reversedUntil = 0;
+      p.railgunChargeStart = 0;
+      p.railgunCharging = false;
+      p.invincibleUntil = 0;
+      p.sizeState = 'normal';
+      p.comboCount = 0;
+      p.gameStats = { movedDistance: 0, pushedDistance: 0, kills: 0 };
+      p.lastHurtBy = null;
+      p.lastHurtTime = 0;
     }
 
     this.addLog("回到大廳，準備下一場大逃殺...");
@@ -1113,27 +1354,67 @@ class GameRoom {
   }
 
   broadcastState() {
-    const payload = {
-      state: this.state,
-      players: this.players,
-      boxes: this.boxes,
-      traps: this.traps,
-      powerups: this.powerups,
-      zone: {
-        x: this.zone.x,
-        y: this.zone.y,
-        radius: this.zone.radius,
-        targetRadius: this.zone.targetRadius,
-        shrinkStage: this.zone.shrinkStage
-      },
-      winner: this.winner ? { name: this.winner.name, color: this.winner.color } : null,
-      logs: this.logs,
-      settings: this.settings,
-      mapWidth: MAP_WIDTH,
-      mapHeight: MAP_HEIGHT
-    };
+    const now = Date.now();
+    const roomSockets = this.io.sockets.adapter.rooms.get(this.roomId);
 
-    this.io.to(this.roomId).emit('gameState', payload);
+    if (!roomSockets) {
+      const payload = {
+        state: this.state,
+        players: this.players,
+        boxes: this.boxes,
+        traps: this.traps,
+        powerups: this.powerups,
+        zone: {
+          x: this.zone.x,
+          y: this.zone.y,
+          radius: this.zone.radius,
+          targetRadius: this.zone.targetRadius,
+          shrinkStage: this.zone.shrinkStage
+        },
+        winner: this.winner ? { name: this.winner.name, color: this.winner.color } : null,
+        logs: this.logs,
+        settings: this.settings,
+        mapWidth: MAP_WIDTH,
+        mapHeight: MAP_HEIGHT,
+        roundAchievements: this.roundAchievements || null
+      };
+      this.io.to(this.roomId).emit('gameState', payload);
+      return;
+    }
+
+    for (const socketId of roomSockets) {
+      const customizedPlayers = {};
+      for (const id in this.players) {
+        const p = this.players[id];
+        const isInvisible = now < (p.invisibleUntil || 0);
+
+        if (!isInvisible || id === socketId) {
+          customizedPlayers[id] = p;
+        }
+      }
+
+      const payload = {
+        state: this.state,
+        players: customizedPlayers,
+        boxes: this.boxes,
+        traps: this.traps,
+        powerups: this.powerups,
+        zone: {
+          x: this.zone.x,
+          y: this.zone.y,
+          radius: this.zone.radius,
+          targetRadius: this.zone.targetRadius,
+          shrinkStage: this.zone.shrinkStage
+        },
+        winner: this.winner ? { name: this.winner.name, color: this.winner.color } : null,
+        logs: this.logs,
+        settings: this.settings,
+        mapWidth: MAP_WIDTH,
+        mapHeight: MAP_HEIGHT,
+        roundAchievements: this.roundAchievements || null
+      };
+      this.io.to(socketId).emit('gameState', payload);
+    }
   }
 }
 

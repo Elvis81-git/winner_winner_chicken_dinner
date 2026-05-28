@@ -28,6 +28,8 @@ const endOverlay = document.getElementById('end-overlay');
 const winnerAnnouncement = document.getElementById('winner-announcement');
 const restartCountdown = document.getElementById('restart-countdown');
 
+const lasers = [];
+
 // Canvas setups
 const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
@@ -36,6 +38,7 @@ const minimapCanvas = document.getElementById('minimap');
 // Game state variables
 let localSocketId = null;
 let roomState = 'LOBBY';
+let lastLogsJson = '';
 let serverData = {
     state: 'LOBBY',
     players: {},
@@ -532,6 +535,22 @@ socket.on('sound', (type) => {
 
 // Visual and knockback effects listeners from server
 socket.on('effect', (eff) => {
+    if (eff.type === 'railgunFire') {
+        lasers.push({
+            x1: eff.x1,
+            y1: eff.y1,
+            x2: eff.x2,
+            y2: eff.y2,
+            width: 26,
+            color: '#00ffcc',
+            alpha: 1.0,
+            fadeSpeed: 0.07
+        });
+        sounds.play('shockwave');
+        cameraShake = Math.max(cameraShake, 22);
+        return;
+    }
+
     // Play synth sound
     sounds.play(eff.type);
 
@@ -572,8 +591,13 @@ socket.on('gameState', (data) => {
     // Roster rendering
     rosterList.innerHTML = '';
     
-    // Sort players (me first, then alphabetical)
+    // Sort players: wins descending, then local player first, then alphabetical
     playersArr.sort((a, b) => {
+        const winsA = a.wins || 0;
+        const winsB = b.wins || 0;
+        if (winsA !== winsB) {
+            return winsB - winsA; // wins descending
+        }
         if (a.id === localSocketId) return -1;
         if (b.id === localSocketId) return 1;
         return a.name.localeCompare(b.name);
@@ -594,6 +618,12 @@ socket.on('gameState', (data) => {
         const nameText = document.createTextNode(p.name + (p.id === localSocketId ? ' (你)' : ''));
         nameWrap.appendChild(dot);
         nameWrap.appendChild(nameText);
+
+        // Win count badge
+        const winsBadge = document.createElement('span');
+        winsBadge.className = 'roster-wins-badge';
+        winsBadge.textContent = `🏆 ${p.wins || 0} 勝`;
+        nameWrap.appendChild(winsBadge);
 
         const badge = document.createElement('span');
         badge.className = 'badge human';
@@ -648,6 +678,8 @@ socket.on('gameState', (data) => {
         hudStatus.textContent = '等待玩家加入...';
         hudTimer.textContent = '--';
         endOverlay.classList.add('hidden');
+        const achievementsContainer = document.getElementById('end-achievements');
+        if (achievementsContainer) achievementsContainer.innerHTML = '';
         if (endCountdownInterval) {
             clearInterval(endCountdownInterval);
             endCountdownInterval = null;
@@ -662,6 +694,8 @@ socket.on('gameState', (data) => {
         
         hudTimer.textContent = `毒圈收縮中`;
         endOverlay.classList.add('hidden');
+        const achievementsContainer = document.getElementById('end-achievements');
+        if (achievementsContainer) achievementsContainer.innerHTML = '';
         if (endCountdownInterval) {
             clearInterval(endCountdownInterval);
             endCountdownInterval = null;
@@ -680,6 +714,35 @@ socket.on('gameState', (data) => {
             winnerAnnouncement.style.color = '#ff007f';
         }
 
+        // Render achievements
+        const achievementsContainer = document.getElementById('end-achievements');
+        if (achievementsContainer) {
+            achievementsContainer.innerHTML = '';
+            if (data.roundAchievements) {
+                const achievementsList = [
+                    { key: 'athlete', title: '🏃 最強飛毛腿', sub: '單局移動距離', unit: 'px', icon: '⚡', theme: 'athlete' },
+                    { key: 'hercules', title: '💪 怪力推土機', sub: '單局推開距離', unit: 'px', icon: '💥', theme: 'hercules' },
+                    { key: 'terminator', title: '☠️ 冷酷終結者', sub: '單局擊殺次數', unit: '次', icon: '💀', theme: 'terminator' }
+                ];
+
+                achievementsList.forEach(ach => {
+                    const item = data.roundAchievements[ach.key];
+                    if (item && item.value > 0) {
+                        const card = document.createElement('div');
+                        card.className = `achievement-card ${ach.theme}`;
+                        card.innerHTML = `
+                            <div class="achievement-title">${ach.title}</div>
+                            <div class="achievement-icon">${ach.icon}</div>
+                            <div class="achievement-badge">${ach.sub}</div>
+                            <div class="achievement-winner" style="color: ${item.color}">${item.name}</div>
+                            <div class="achievement-value">${item.value} ${ach.unit}</div>
+                        `;
+                        achievementsContainer.appendChild(card);
+                    }
+                });
+            }
+        }
+
         // Trigger local 8s reset countdown if not running
         if (!endCountdownInterval) {
             localEndCountdown = 8;
@@ -695,8 +758,9 @@ socket.on('gameState', (data) => {
     // HUD Bars & Cooldowns update
     if (localPlayer) {
         // HP bar
-        hudHpFill.style.width = `${localPlayer.health}%`;
-        hudHpVal.textContent = Math.round(localPlayer.health);
+        const maxHP = localPlayer.maxHealth || 100;
+        hudHpFill.style.width = `${(localPlayer.health / maxHP) * 100}%`;
+        hudHpVal.textContent = `${Math.round(localPlayer.health)}/${maxHP}`;
 
         // Energy (stamina) bar
         hudEnergyFill.style.width = `${localPlayer.stamina}%`;
@@ -707,7 +771,9 @@ socket.on('gameState', (data) => {
             teleport: '瞬間移動 🌌',
             speed: '跑速變快 ⚡',
             freeze: '召喚冰牆 🧊',
-            shockwave: '重力衝擊波 💥'
+            shockwave: '重力衝擊波 💥',
+            invisibility: '靈魂隱形 👻',
+            railgun: '電磁砲 ⚡'
         };
         const activeTrapName = trapNames[localPlayer.selectedTrap || 'teleport'];
         hudTrapDisplay.textContent = `${activeTrapName} (x${localPlayer.trapsInventory})`;
@@ -716,15 +782,19 @@ socket.on('gameState', (data) => {
         cooldownFill.style.height = `${(localPlayer.dashCooldown / 1200) * 100}%`;
     }
 
-    // Message Logs
-    feedLogs.innerHTML = '';
-    const recentLogs = data.logs.slice(-4);
-    recentLogs.forEach(log => {
-        const entry = document.createElement('div');
-        entry.className = 'log-entry';
-        entry.textContent = log.text;
-        feedLogs.appendChild(entry);
-    });
+    // Message Logs (Only update DOM when logs change to prevent entry-animation flashing)
+    const logsJson = JSON.stringify(data.logs);
+    if (logsJson !== lastLogsJson) {
+        lastLogsJson = logsJson;
+        feedLogs.innerHTML = '';
+        const recentLogs = data.logs.slice(-4);
+        recentLogs.forEach(log => {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.textContent = log.text;
+            feedLogs.appendChild(entry);
+        });
+    }
 });
 
 // Periodic Input Sending loop (40ms interval)
@@ -802,6 +872,7 @@ function gameLoop() {
     drawPowerups(offsetX, offsetY);
     drawBoxes(offsetX, offsetY);
     drawPlayers(offsetX, offsetY);
+    drawLasers(offsetX, offsetY);
     drawParticles(offsetX, offsetY);
     drawToxicZoneMask(offsetX, offsetY);
 
@@ -997,6 +1068,36 @@ function drawPowerups(offsetX, offsetY) {
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText('⚡', pw.x, pw.y);
+        } else if (pw.type === 'grow_fruit') {
+            ctx.fillStyle = 'rgba(230, 126, 34, 0.2)';
+            ctx.strokeStyle = '#E67E22';
+            ctx.shadowColor = '#E67E22';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(pw.x, pw.y, pw.radius + pulse/2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            
+            ctx.fillStyle = '#E67E22';
+            ctx.font = "900 11px sans-serif";
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🍊', pw.x, pw.y);
+        } else if (pw.type === 'shrink_fruit') {
+            ctx.fillStyle = 'rgba(231, 76, 60, 0.2)';
+            ctx.strokeStyle = '#E74C3C';
+            ctx.shadowColor = '#E74C3C';
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.arc(pw.x, pw.y, pw.radius + pulse/2, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            
+            ctx.fillStyle = '#E74C3C';
+            ctx.font = "900 11px sans-serif";
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🍓', pw.x, pw.y);
         }
         ctx.restore();
     });
@@ -1109,6 +1210,33 @@ function drawPlayers(offsetX, offsetY) {
 
         const r = p.radius;
         const now = Date.now();
+        const isInvisible = now < (p.invisibleUntil || 0);
+
+        ctx.save();
+        if (isInvisible) {
+            ctx.globalAlpha = 0.35;
+        }
+
+        // Railgun charging glow
+        const isChargingRailgun = now < (p.railgunChargeStart + 1000) && p.railgunCharging;
+        if (isChargingRailgun) {
+            ctx.save();
+            ctx.shadowBlur = 20 + Math.sin(now * 0.02) * 8;
+            ctx.shadowColor = '#00ffcc';
+            ctx.strokeStyle = '#00ffcc';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r + 8 + Math.sin(now * 0.015) * 3, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            // Draw charging indicator bar above head
+            const chargePercent = (now - p.railgunChargeStart) / 1000;
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(p.x - 20, p.y - r - 22, 40, 3);
+            ctx.fillStyle = '#00ffcc';
+            ctx.fillRect(p.x - 20, p.y - r - 22, Math.min(1.0, chargePercent) * 40, 3);
+            ctx.restore();
+        }
 
         // Stunned status stars
         const isStunned = now < p.stunnedUntil;
@@ -1167,6 +1295,20 @@ function drawPlayers(offsetX, offsetY) {
             ctx.restore();
         }
 
+        // Invincibility shield bubble (Gold)
+        const isInvincible = now < (p.invincibleUntil || 0);
+        if (isInvincible) {
+            ctx.save();
+            ctx.strokeStyle = '#F1C40F';
+            ctx.lineWidth = 4;
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = '#F1C40F';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, r + 6 + Math.sin(now * 0.02) * 2, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+        }
+
         // Frozen ice overlay
         if (isFrozen) {
             ctx.save();
@@ -1217,7 +1359,8 @@ function drawPlayers(offsetX, offsetY) {
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
         ctx.fillRect(p.x - 20, p.y - r - 10, 40, 4);
         ctx.fillStyle = '#2ECC71';
-        ctx.fillRect(p.x - 20, p.y - r - 10, (p.health / 100) * 40, 4);
+        const maxHP = p.maxHealth || 100;
+        ctx.fillRect(p.x - 20, p.y - r - 10, (p.health / maxHP) * 40, 4);
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 0.8;
         ctx.strokeRect(p.x - 20, p.y - r - 10, 40, 4);
@@ -1229,8 +1372,49 @@ function drawPlayers(offsetX, offsetY) {
         ctx.textAlign = 'center';
         const labelText = p.name + (p.id === localSocketId ? ' (你)' : '');
         ctx.fillText(labelText, p.x, p.y - r - 15);
+
+        ctx.restore(); // Restore from our Invisibility globalAlpha save!
     });
 
+    ctx.restore();
+}
+
+function drawLasers(offsetX, offsetY) {
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    for (let i = lasers.length - 1; i >= 0; i--) {
+        const laser = lasers[i];
+        
+        ctx.save();
+        ctx.globalAlpha = laser.alpha;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = laser.color;
+        
+        // Outer glow
+        ctx.strokeStyle = laser.color;
+        ctx.lineWidth = laser.width;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+
+        // Inner core
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = laser.width * 0.4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(laser.x1, laser.y1);
+        ctx.lineTo(laser.x2, laser.y2);
+        ctx.stroke();
+        
+        ctx.restore();
+
+        laser.alpha -= laser.fadeSpeed;
+        if (laser.alpha <= 0) {
+            lasers.splice(i, 1);
+        }
+    }
     ctx.restore();
 }
 
@@ -1375,21 +1559,43 @@ function drawMinimap() {
     mCtx.stroke();
 }
 
-// Temporary Flashing Notification text
 function drawAnnouncementBanner() {
     if (announcementTimer > 0 && roomState === 'PLAYING') {
         announcementTimer--;
         ctx.save();
-        ctx.font = "900 22px 'Orbitron', sans-serif";
-        ctx.fillStyle = '#ff007f';
-        ctx.strokeStyle = '#080a10';
-        ctx.lineWidth = 5;
-        ctx.textAlign = 'center';
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = '#ff007f';
         
-        ctx.strokeText(announcementMsg, canvas.width / 2, 120);
-        ctx.fillText(announcementMsg, canvas.width / 2, 120);
+        // Measure text width for responsive banner size
+        ctx.font = "bold 22px 'Orbitron', sans-serif";
+        const textWidth = ctx.measureText(announcementMsg).width;
+        const bannerW = Math.max(380, textWidth + 50);
+        const bannerH = 48;
+        const bannerX = canvas.width / 2 - bannerW / 2;
+        const bannerY = 320 - bannerH / 2;
+        
+        // Draw Glassmorphic Banner Background (Semi-transparent dark with pink neon border)
+        ctx.fillStyle = 'rgba(8, 10, 16, 0.72)';
+        ctx.strokeStyle = 'rgba(255, 0, 127, 0.5)';
+        ctx.lineWidth = 2;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'rgba(255, 0, 127, 0.35)';
+        
+        ctx.beginPath();
+        if (typeof ctx.roundRect === 'function') {
+            ctx.roundRect(bannerX, bannerY, bannerW, bannerH, 24); // Pill shaped
+        } else {
+            ctx.rect(bannerX, bannerY, bannerW, bannerH);
+        }
+        ctx.fill();
+        ctx.stroke();
+        
+        // Draw text inside the banner
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = '#ff007f';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        ctx.fillText(announcementMsg, canvas.width / 2, 320);
         ctx.restore();
     }
 }
